@@ -1,0 +1,86 @@
+%%{init: {'theme':'base', 'themeVariables': {
+  'fontFamily':'Inter, Helvetica, Arial, sans-serif',
+  'fontSize':'14px',
+  'primaryColor':'#eef2ff',
+  'primaryBorderColor':'#6366f1',
+  'lineColor':'#64748b',
+  'tertiaryColor':'#f8fafc'
+}}}%%
+flowchart TD
+  START([" Alert webhook · 202 in &lt;200ms "]):::entry --> ENRICH
+
+  subgraph INGEST [" 1 · Ingestion "]
+    ENRICH["alert_enricher<br/><i>owner · repo · deploys · traceback</i>"]:::det
+  end
+
+  subgraph DIAG [" 2 · Diagnosis "]
+    RETRIEVE["parallel_retriever<br/><i>BM25 + semantic → RRF → rerank → top-5</i>"]:::det
+    RCA["rca_synthesizer  ×N=3<br/><i>self-consistency · composite confidence</i>"]:::llm
+  end
+
+  ENRICH --> RETRIEVE --> RCA
+
+  RCA -->|" confidence &lt; 0.65 "| ESC
+  RCA -->|" ≥ 0.65 "| TRIAGE
+
+  subgraph TRG [" 3 · Triage "]
+    TRIAGE["triage_router<br/><i>rule prior + LLM confirm</i>"]:::llm
+  end
+
+  TRIAGE -->|" infra ≥0.70 "| INFRA
+  TRIAGE -->|" config ≥0.70 "| CONFIG
+  TRIAGE -->|" code_bug ≥0.70 "| AST
+  TRIAGE -->|" confidence &lt; 0.70 "| UNK
+
+  subgraph REM [" 4 · Remediation "]
+    INFRA["runbook_executor"]:::llm
+    CONFIG["config_diff_analyzer"]:::llm
+    AST["ast_code_retriever<br/><i>tree-sitter @ deploy commit · cache</i>"]:::det
+    PATCH["patch_generator  ×≤2<br/><i>regen fn → diff → syntax check</i>"]:::llm
+    LOC["code_context_only<br/><i>location + TODO · no diff</i>"]:::det
+  end
+
+  AST -->|" Py / JS / Go "| PATCH
+  AST -->|" C# / Rust "| LOC
+  AST -->|" clone/index fail "| ESC
+  PATCH -->|" valid diff "| PLAN
+  PATCH -->|" 2× syntax fail / out-of-scope "| LOC
+  INFRA --> PLAN
+  CONFIG --> PLAN
+  LOC --> PLAN
+
+  UNK["unknown_path<br/><i>evidence + hypotheses · NO commands</i>"]:::safe
+  ESC["escalation_node<br/><i>typed errors · Slack summary · NO commands</i>"]:::safe
+
+  PLAN{{" remediation_plan ready "}}:::gate
+
+  subgraph REV [" 5 · Review (Human-in-the-loop) "]
+    GATE[["human_checkpoint<br/><i>interrupt() + Postgres checkpoint</i>"]]:::human
+  end
+
+  PLAN --> GATE
+  GATE -->|" approved / edited "| EXEC
+  GATE -->|" rejected "| PMORTEM
+  GATE -.->|" timeout watcher "| SKIP
+
+  subgraph EXE [" 6 · Execution "]
+    EXEC["execution_layer<br/><i>catalog render · immutable ExecutionLog</i>"]:::det
+    SKIP["execution_skipped"]:::safe
+  end
+
+  subgraph PM [" 7 · Post-mortem "]
+    PMORTEM["post_mortem_writer<br/><i>timeline + SMART actions + citations</i>"]:::llm
+  end
+
+  EXEC --> PMORTEM
+  SKIP --> PMORTEM
+  UNK --> PMORTEM
+  ESC --> PMORTEM
+  PMORTEM --> ENDN([" resolved "]):::entry
+
+  classDef llm fill:#e0e7ff,stroke:#4f46e5,stroke-width:2px,color:#1e1b4b;
+  classDef det fill:#f1f5f9,stroke:#64748b,stroke-width:1.5px,color:#0f172a;
+  classDef safe fill:#fef3c7,stroke:#d97706,stroke-width:1.5px,color:#7c2d12;
+  classDef gate fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px,color:#14532d;
+  classDef human fill:#fae8ff,stroke:#a21caf,stroke-width:2px,color:#581c87;
+  classDef entry fill:#0f172a,stroke:#0f172a,stroke-width:1px,color:#f8fafc;
