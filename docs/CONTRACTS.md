@@ -240,7 +240,7 @@ class AgentSpan(BaseModel):
 
 class TypedError(BaseModel):
     node: str
-    kind: Literal["clone_timeout","empty_retrieval","invalid_json",
+    kind: Literal["clone_timeout","empty_retrieval","invalid_json","llm_timeout",
                   "low_confidence","unsupported_language","patch_failed","other"]
     reason: str
     ts: datetime
