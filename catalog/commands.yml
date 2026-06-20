@@ -1,0 +1,32 @@
+# catalog/commands.yml
+# The single source of truth for every action IncidentIQ is allowed to take.
+# The LLM never writes shell — it picks a command_id from this file and fills args.
+commands:
+  flag_rollback:
+    description: "Disable a feature flag via flagd"
+    template: "curl -X PUT {flagd_url}/flags/{flag_key} -d '{{\"state\":\"DISABLED\"}}'"
+    args:
+      flag_key:  { type: string, pattern: "^[A-Za-z0-9._-]+$" }
+      flagd_url: { type: string, default: "http://flagd:8013", pattern: "^https?://[A-Za-z0-9.:_/-]+$" }
+    approval_required: true
+    allowed_namespaces: ["otel-demo"]
+    remediation_class: flag_rollback
+
+  kubectl_rollout_restart:
+    description: "Restart a deployment"
+    template: "kubectl rollout restart deploy/{deployment} -n {namespace}"
+    args:
+      deployment: { type: string, pattern: "^[a-z0-9-]+$" }
+      namespace:  { type: string, enum: ["otel-demo"] }
+    approval_required: true
+    allowed_namespaces: ["otel-demo"]
+    remediation_class: kubectl
+
+  config_revert:
+    description: "Revert a config key to prior deploy value"
+    template: "git revert --no-edit {commit}"
+    args:
+      commit: { type: string, pattern: "^[0-9a-f]{7,40}$" }
+    approval_required: true
+    allowed_namespaces: ["otel-demo"]
+    remediation_class: config_revert
