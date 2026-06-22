@@ -128,6 +128,62 @@ you don't control.**
 - *Interview framing:* "I can point at the corpus and say which line each layer is responsible
   for. That's how I know 0% unsafe-action is a structural property, not a lucky test pass."
 
+**D-5 — `render_command` returns a `RenderedCommand`, NOT an `ExecutionStep`; render and execute
+are separate boundaries.**
+- *Observed:* `ExecutionStep` (state.py) carries `stdout`/`exit_code`/`ts` — fields that only exist
+  *after* something runs. The renderer produces only `command_id`/`rendered`/`args`/`approval_required`.
+- *Means:* rendering (deterministic, pure, no side effects, no approval needed) and execution
+  (effectful, gated on `ApprovalDecision.approved`, FR-16) are different responsibilities. Returning
+  an `ExecutionStep` would force the renderer to invent runtime fields it can't know, and would blur
+  the approval gate.
+- *Choice:* a dedicated `RenderedCommand` artifact = the audited *pre-execution* value; the later
+  execution layer consumes it, runs it via argv (never `shell=True`), and *then* constructs the
+  `ExecutionStep` with the real stdout/exit/ts. `approval_required` is surfaced here but enforced
+  there (CONTRACTS §4 rule 5 lives at the execution boundary, not the render boundary).
+- *Interview framing:* "Pure render, effectful execute — two objects, two boundaries. The renderer
+  can be called freely in tests and previews because producing the string commits to nothing; only
+  the execution layer touches the approval gate and the outside world."
+
+**F-21 — Two enforcement points raise two different exception types, on purpose.**
+- *Observed:* the contract boundary (`CommandIntent.model_validate`) raises Pydantic
+  `ValidationError`; the renderer (`render_command`) raises `CatalogError` (a `ValueError` subclass).
+  The injection corpus asserts each entry fails under *its* layer's type.
+- *Means:* the renderer is not a Pydantic validator, so reusing `ValidationError` would be a lie
+  about where the failure happened. Distinct types let callers (and tests) tell "the model emitted
+  an un-allowed intent" apart from "an intent that passed the contract still failed at render time"
+  — the second is the defense-in-depth catch and should be visible as such.
+- *Known limitation (logged, not a bug):* `allowed_namespaces` is enforced only when the command
+  *has* a `namespace` arg present in the effective args. A catalog author who forgets to declare a
+  `namespace` arg on a namespaced command gets no namespace check. Today this is belt-and-suspenders
+  (kubectl's `namespace` also has an `enum`), but the real guard should be a **catalog-authoring
+  lint** (assert every command with `allowed_namespaces` declares a `namespace` arg) — now tracked
+  as the **"Catalog-authoring lint"** item in the Security hardening section of `docs/TASKS.md`,
+  noted here so it isn't silently assumed safe.
+- *Interview framing:* "Each layer fails in its own currency — a contract `ValidationError` vs a
+  render-time `CatalogError` — so the trace tells you which guard fired. And I wrote down the one
+  spot where namespace enforcement is author-trust rather than enforced, instead of pretending the
+  backstop is total."
+
+**F-22 — Added `pyyaml`; chose YAML as the catalog format on purpose.**
+- *Observed:* Task 3 added one dependency — `pyyaml` (`uv add pyyaml`, → `pyproject.toml` +
+  `uv.lock`). It's the only new runtime dep since Task 1's stack (httpx, pydantic).
+- *Means:* the catalog is **human-authored configuration that humans review** — it is the trust
+  root for execution, so a reviewer must be able to read it at a glance and comment in it. YAML
+  gives comments and low-noise nesting; JSON has no comments; TOML (stdlib `tomllib`) gets awkward
+  for the nested `commands → args → {type/enum/pattern}` shape. Python ships no stdlib YAML parser,
+  so a dependency is unavoidable if YAML is the format — and `pyyaml` is the de-facto choice.
+- *Choice:* `pyyaml`, loaded exclusively via `safe_load` (see F-17). The catalog format optimises
+  for *auditability by a human reviewer*, which matters more here than avoiding a dependency, since
+  the file gates what the system is allowed to do. (The k8s/OTel ecosystem the demo lives in also
+  speaks YAML, so the format is familiar to the reviewer.)
+- *Interview framing:* "The one dependency I added is for the file a human has to trust. I picked
+  YAML because the catalog is reviewed by people, not just parsed by code — comments and readability
+  are a safety feature when the file is your allowlist."
+
+> **Housekeeping note (not a finding):** Task 2 left a TODO to drop a duplicated `_ARG_TYPES` in
+> `state.py` at the start of Task 3. Verified at Task 3 start — only a single definition exists
+> (line ~30); nothing to remove. No change made.
+
 ---
 
 ## Worktree note

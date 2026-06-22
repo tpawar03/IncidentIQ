@@ -9,3 +9,6 @@ wheels/
 # Virtual environments
 .venv
 .DS_Store
+
+# Third-party corpus repos (fetched locally, never vendored)
+corpus_sources/

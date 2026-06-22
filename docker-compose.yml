@@ -1,0 +1,29 @@
+services:
+  postgres:
+    # pgvector/pgvector ships Postgres 16 with the `vector` extension preinstalled.
+    # This ONE Postgres has three jobs: vector store (retrieval), app DB (incidents),
+    # and the LangGraph checkpoint store (durability) — AGENT_ORCHESTRATION line 262.
+    image: pgvector/pgvector:pg16
+    container_name: incidentiq-postgres
+    environment:
+      POSTGRES_USER: incidentiq
+      POSTGRES_PASSWORD: incidentiq
+      POSTGRES_DB: incidentiq
+    ports:
+      # Host 5433 → container 5432: avoids colliding with a host Postgres on 5432.
+      # App/init connect string therefore uses port 5433.
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # FR-23: the health gate. Dependent services declare
+      #   depends_on: { postgres: { condition: service_healthy } }
+      # so nothing can talk to an unready DB — and the retriever can never
+      # reach a store that isn't up.
+      test: ["CMD-SHELL", "pg_isready -U incidentiq -d incidentiq"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
