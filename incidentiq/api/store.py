@@ -65,3 +65,16 @@ def insert_incident(
         existing = cur.fetchone()
         conn.commit()
         return (existing[0] if existing else incident_id), False
+
+
+def get_raw_payload(incident_id: str) -> dict | None:
+    """Fetch the exact inbound payload persisted for an incident.
+
+    The background investigation reconstructs its inputs from the DB rather than
+    receiving them in-memory — the incident row is the source of truth (mirrors how
+    the LangGraph checkpointer rehydrates state). Returns None if the id is unknown.
+    """
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT raw_payload FROM incidents WHERE incident_id = %s", (incident_id,))
+        row = cur.fetchone()
+        return row[0] if row else None

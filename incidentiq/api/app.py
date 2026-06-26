@@ -13,8 +13,9 @@ from fastapi import BackgroundTasks, FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import TypeAdapter, ValidationError
 
+from incidentiq.api.enricher import enrich
 from incidentiq.api.fingerprint import compute_fingerprint
-from incidentiq.api.store import apply_schema, insert_incident
+from incidentiq.api.store import apply_schema, get_raw_payload, insert_incident
 from incidentiq.api.webhooks import AlertManagerV4, WebhookPayload
 
 _webhook = TypeAdapter(WebhookPayload)
@@ -30,10 +31,20 @@ app = FastAPI(title="IncidentIQ", version="0.1.0", lifespan=lifespan)
 
 
 async def run_investigation(incident_id: str) -> None:
-    """Background entry point for the agent graph. STUB until the LangGraph task lands —
-    later this becomes graph.ainvoke(initial_state) under the Postgres checkpointer."""
-    # TODO(graph task): build initial IncidentState, call graph.ainvoke(...).
-    pass
+    """Background entry point for the agent graph. Loads the persisted payload,
+    rebuilds the trusted IncidentContext, then (later) drives the graph.
+
+    STUB at the graph boundary until the LangGraph task lands — at which point the
+    enriched context becomes part of the initial IncidentState for graph.ainvoke(...).
+    """
+    raw = get_raw_payload(incident_id)
+    if raw is None:                       # incident vanished (e.g. resolved) → nothing to do
+        return
+
+    alert = _webhook.validate_python(raw).normalized()
+    context = enrich(alert, raw)
+    # TODO(graph task): build IncidentState(incident_context=context, ...), call graph.ainvoke(...).
+    _ = context
 
 
 @app.post("/api/v1/incidents")
