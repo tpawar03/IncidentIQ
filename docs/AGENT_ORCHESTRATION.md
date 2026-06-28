@@ -12,6 +12,11 @@
 One flat `StateGraph` (decision #8). Nodes are agents; conditional edges implement triage
 and failure routing. Deterministic nodes are plain; **LLM nodes are bold**.
 
+> **Implementation note (Task 9):** `alert_enricher` runs as a **pre-graph step** in the
+> FastAPI background task, not as a graph node. It is the single untrusted→trusted conversion
+> (D-9); the graph therefore always receives an already-enriched, trusted `IncidentContext`
+> (a *required* field of `IncidentState`). Graph entry node is `parallel_retriever`.
+
 ```mermaid
 flowchart TD
     START([webhook 202]) --> ENRICH[alert_enricher]

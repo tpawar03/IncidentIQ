@@ -14,7 +14,7 @@ from incidentiq.db import connect
 from incidentiq.retrieval.chunking import Chunk, chunk_postmortem, chunk_runbook
 from incidentiq.retrieval.embedding import embed_passages
 
-# repo_root/corpus_sources (this module now lives at incidentiq/retrieval/)
+# repo_root/corpus_sources (this module lives at incidentiq/retrieval/)
 CORPUS_ROOT = Path(__file__).parent.parent.parent / "corpus_sources"
 _SCHEMA_SQL = Path(__file__).parent / "schema.sql"
 POSTMORTEMS = CORPUS_ROOT / "postmortems" / "data"
