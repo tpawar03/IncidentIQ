@@ -48,12 +48,12 @@ def test_hallucinated_chunk_id_rejected():
         RCAReport.grounded(retrieved=retrieved, **_rca_fields("pm_9999"))
 
 
-def test_missing_context_fails_closed():
-    # the plain constructor / context-less model_validate cannot prove grounding
-    with pytest.raises(ValidationError, match="fail-closed"):
-        RCAReport(**_rca_fields("pm_0007"))
-    with pytest.raises(ValidationError, match="fail-closed"):
-        RCAReport.model_validate(_rca_fields("pm_0007"))
+def test_context_free_construction_is_trusted():
+    # Re-validation without context (LangGraph state coercion / checkpoint deserialize) no longer
+    # fails-closed: grounding is enforced at birth via .grounded() and re-asserted at the
+    # IncidentState level. A report therefore round-trips from its own dump without context.
+    r = RCAReport.grounded(retrieved=_retrieved("pm_0007"), **_rca_fields("pm_0007"))
+    assert RCAReport(**r.model_dump()) == r
 
 
 def test_context_helper_extracts_ids():
@@ -164,6 +164,19 @@ def _min_state() -> IncidentState:
             starts_at=datetime.now(timezone.utc),
         ),
     )
+
+def test_incident_state_rejects_ungrounded_rca():
+    # The durable guarantee: an RCAReport whose citations escape retrieved_context is rejected at
+    # the IncidentState level even when reconstructed context-free (the LangGraph coercion path).
+    good = RCAReport.grounded(retrieved=_retrieved("pm_0007"), **_rca_fields("pm_0007"))
+    tampered = good.model_dump()
+    tampered["source_citations"] = [{"claim": "c", "chunk_id": "pm_9999"}]  # escapes the set
+    data = _min_state().model_dump()
+    data["retrieved_context"] = _retrieved("pm_0007").model_dump()
+    data["rca_report"] = tampered
+    # model_validate RUNS validators (model_copy bypasses them) — LangGraph's branch-read path.
+    with pytest.raises(ValidationError, match="absent from retrieved_context"):
+        IncidentState.model_validate(data)
 
 
 def test_incident_state_round_trips():

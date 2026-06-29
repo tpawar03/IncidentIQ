@@ -91,6 +91,15 @@ async def _ok_synth(incident, retrieved, *, client):
         source_citations=[Citation(claim="latency from deploy", chunk_id="c1")],
     )
 
+async def _ok_triage(incident, rca, *, client):
+    from incidentiq.contracts import IncidentType
+    from incidentiq.state import TriageDecision
+    return TriageDecision(
+        incident_type=IncidentType.infra, confidence=0.9,
+        rule_prior=IncidentType.infra, rule_prior_strength=0.8,
+        llm_agreed=True, rationale="fake",
+    )
+
 
 def test_killed_graph_resumes_from_last_node(require_postgres):
     thread_id = f"durability-test-{uuid.uuid4().hex[:8]}"
@@ -113,7 +122,8 @@ def test_killed_graph_resumes_from_last_node(require_postgres):
     async def run2():
         async with postgres_checkpointer() as cp:
             app = build_graph(
-                client=None, retrieve_fn=retriever, synthesize_fn=_ok_synth, checkpointer=cp,
+                client=None, retrieve_fn=retriever, synthesize_fn=_ok_synth,
+                triage_fn=_ok_triage, checkpointer=cp,
             )
             return await app.ainvoke(None, config)  # None input → resume from checkpoint
 

@@ -23,3 +23,13 @@ RCA_SAMPLES: int = 3                 # N generations per incident; vote on root_
 # Qwen3-8B window is large, but we keep a safe working ceiling and reserve headroom
 # for the JSON completion so the prompt + answer never overflow.
 RCA_PROMPT_TOKEN_BUDGET: int = 6000
+
+
+# --- Triage rule-prior tuning (decision #4) ---
+# A deploy within this window strengthens a deploy-correlated prior (code_bug / config).
+RECENT_DEPLOY_MINUTES: int = 60
+
+# --- Triage hybrid-confidence knobs (decision #4) — MF-1 placeholders ---
+TRIAGE_AGREE_BONUS: float = 0.10       # rule↔LLM concur → corroboration boost
+TRIAGE_DISAGREE_PENALTY: float = 0.30  # rule↔LLM conflict → drop toward the unknown gate
+

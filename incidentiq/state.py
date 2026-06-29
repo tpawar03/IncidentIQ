@@ -223,13 +223,13 @@ class RCAReport(BaseModel):                       # GRAMMAR-CONSTRAINED OUTPUT
 
     @model_validator(mode="after")
     def citations_resolve_to_retrieved_chunks(self, info: ValidationInfo) -> "RCAReport":
-        # Fail-closed (D-3): without the retrieval set we CANNOT prove grounding, so refuse.
+        # Enforce-at-birth: .grounded() passes valid_chunk_ids → hallucinated citations are
+        # rejected when the report is minted from raw LLM output. Context-free re-validation
+        # (LangGraph state coercion, checkpoint deserialize) TRUSTS that prior check — grounding
+        # is re-asserted at the IncidentState level against the retrieved_context sibling.
         valid_ids = (info.context or {}).get("valid_chunk_ids")
         if valid_ids is None:
-            raise ValueError(
-                "RCAReport requires context={'valid_chunk_ids': {...}} to verify citation "
-                "grounding; refusing to build an unverifiable report (fail-closed)."
-            )
+            return self
         unknown = sorted({c.chunk_id for c in self.source_citations if c.chunk_id not in valid_ids})
         if unknown:
             raise ValueError(f"citations reference chunk_ids not in the retrieved set: {unknown}")
@@ -329,4 +329,19 @@ class IncidentState(BaseModel):
     approval_decision: ApprovalDecision | None = None
     execution_log: ExecutionLog = ExecutionLog()
     errors: Annotated[list[TypedError], add] = []     # additive reducer (LangGraph reads `add`)
-    trace:  Annotated[list[AgentSpan], add] = []      # additive reducer
+    trace:  Annotated[list[AgentSpan], add] = [] 
+    
+    
+    @model_validator(mode="after")
+    def rca_citations_grounded_in_retrieval(self) -> "IncidentState":
+        # The durable guarantee (replaces RCAReport's context-free fail-closed): wherever an
+        # RCAReport lives in state, its citations must resolve to the retrieval set ALSO in state.
+        # Runs on every LangGraph coercion; idempotent because the synthesizer grounded them at birth.
+        if self.rca_report is not None and self.retrieved_context is not None:
+            valid = {c.chunk_id for c in self.retrieved_context.chunks}
+            bad = sorted(
+                {c.chunk_id for c in self.rca_report.source_citations if c.chunk_id not in valid}
+            )
+            if bad:
+                raise ValueError(f"rca_report cites chunk_ids absent from retrieved_context: {bad}")
+        return self     # additive reducer
