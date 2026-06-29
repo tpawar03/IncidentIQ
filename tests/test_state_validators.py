@@ -124,9 +124,21 @@ def test_injected_command_id_rejected():
         _cmd("delete_everything", {})                          # CI-4: the backstop in action
 
 
-def test_missing_catalog_fails_closed():
-    with pytest.raises(ValidationError, match="fail-closed"):
-        CommandIntent(command_id="flag_rollback", args={"flag_key": "x"})
+def test_command_intent_noops_without_context_but_state_enforces():
+    # F12-1: a context-free CommandIntent no longer raises (LangGraph re-instantiates models
+    # context-free). The blessed path still enforces at birth; the durable guarantee moves to
+    # the IncidentState level, which re-checks against the real, file-backed catalog.
+    from incidentiq.state import RemediationClass, RemediationPlan
+
+    bare = CommandIntent(command_id="not_a_real_command", args={})
+    assert bare.command_id == "not_a_real_command"          # constructs context-free (no-op)
+
+    data = _min_state().model_dump()
+    data["remediation_plan"] = RemediationPlan(
+        remediation_class=RemediationClass.none, summary="x", steps=[bare],
+    ).model_dump()
+    with pytest.raises(ValidationError, match="not in the catalog"):
+        IncidentState.model_validate(data)                  # state-level backstop rejects it
 
 
 def test_unknown_arg_rejected():

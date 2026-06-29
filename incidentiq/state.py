@@ -164,13 +164,13 @@ class CommandIntent(BaseModel):                  # the ONLY executable shape (FR
 
     @model_validator(mode="after")
     def command_is_in_catalog(self, info: ValidationInfo) -> "CommandIntent":
-        # Fail-closed: no catalog in scope → cannot prove this command is allowed → refuse.
+        # Enforce-with-context, trust on re-validation (F12-1, mirrors RCAReport's F10-6):
+        # the blessed path (.from_catalog) proves the command against the catalog at birth.
+        # Context-free re-validation (LangGraph state coercion, checkpoint deserialize) no-ops —
+        # the durable guarantee is re-asserted at the IncidentState level against the real catalog.
         catalog = (info.context or {}).get("catalog")
         if catalog is None:
-            raise ValueError(
-                "CommandIntent requires context={'catalog': {...}} to verify the command is "
-                "allowed; refusing to build an unvalidated executable intent (fail-closed)."
-            )
+            return self
         spec = catalog.get(self.command_id)
         if spec is None:                                    # the CI-4 backstop
             raise ValueError(f"command_id {self.command_id!r} is not in the catalog")
@@ -178,6 +178,11 @@ class CommandIntent(BaseModel):                  # the ONLY executable shape (FR
         if errors:
             raise ValueError("; ".join(errors))
         return self
+
+    @classmethod
+    def from_catalog(cls, *, catalog: dict, **fields) -> "CommandIntent":
+        """The only blessed constructor: the command is proven against `catalog` at birth."""
+        return cls.model_validate(fields, context={"catalog": catalog})
 
 class RemediationPlan(BaseModel):                # GRAMMAR-CONSTRAINED OUTPUT
     remediation_class: RemediationClass
@@ -329,9 +334,9 @@ class IncidentState(BaseModel):
     approval_decision: ApprovalDecision | None = None
     execution_log: ExecutionLog = ExecutionLog()
     errors: Annotated[list[TypedError], add] = []     # additive reducer (LangGraph reads `add`)
-    trace:  Annotated[list[AgentSpan], add] = [] 
-    
-    
+    trace:  Annotated[list[AgentSpan], add] = []
+
+
     @model_validator(mode="after")
     def rca_citations_grounded_in_retrieval(self) -> "IncidentState":
         # The durable guarantee (replaces RCAReport's context-free fail-closed): wherever an
@@ -344,4 +349,24 @@ class IncidentState(BaseModel):
             )
             if bad:
                 raise ValueError(f"rca_report cites chunk_ids absent from retrieved_context: {bad}")
-        return self     # additive reducer
+        return self
+
+    @model_validator(mode="after")
+    def remediation_steps_grounded_in_catalog(self) -> "IncidentState":
+        # Durable backstop (F12-1): every CommandIntent that lives in state must resolve to the
+        # real catalog, re-checked on every LangGraph coercion. CommandIntent's own validator
+        # no-ops without context; this re-asserts it against the file-backed allowlist (idempotent).
+        plan = self.remediation_plan
+        if plan is not None and plan.steps:
+            from incidentiq.catalog import load_catalog   # lazy: avoid catalog↔state import cycle
+            catalog = load_catalog()
+            for step in plan.steps:
+                spec = catalog.get(step.command_id)
+                if spec is None:
+                    raise ValueError(
+                        f"remediation_plan command {step.command_id!r} is not in the catalog"
+                    )
+                errors = validate_command_args(step.args, spec.get("args", {}))
+                if errors:
+                    raise ValueError("; ".join(errors))
+        return self

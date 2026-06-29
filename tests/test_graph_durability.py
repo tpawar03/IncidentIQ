@@ -101,6 +101,20 @@ async def _ok_triage(incident, rca, *, client):
     )
 
 
+async def _ok_infra(incident, rca, *, client, catalog=None):
+    # Task 12 wired runbook_executor as a real node; fake its plan so the durability test
+    # (which is about checkpoint resume, not remediation) never touches the real LLM.
+    from incidentiq.catalog import load_catalog
+    from incidentiq.state import CommandIntent, RemediationClass, RemediationPlan
+    cat = load_catalog()
+    return RemediationPlan(
+        remediation_class=RemediationClass.kubectl, summary="restart",
+        steps=[CommandIntent.from_catalog(
+            catalog=cat, command_id="kubectl_rollout_restart",
+            args={"deployment": "checkout", "namespace": "otel-demo"})],
+    )
+
+
 def test_killed_graph_resumes_from_last_node(require_postgres):
     thread_id = f"durability-test-{uuid.uuid4().hex[:8]}"
     config = {"configurable": {"thread_id": thread_id}}
@@ -123,7 +137,7 @@ def test_killed_graph_resumes_from_last_node(require_postgres):
         async with postgres_checkpointer() as cp:
             app = build_graph(
                 client=None, retrieve_fn=retriever, synthesize_fn=_ok_synth,
-                triage_fn=_ok_triage, checkpointer=cp,
+                triage_fn=_ok_triage, infra_fn=_ok_infra, checkpointer=cp,
             )
             return await app.ainvoke(None, config)  # None input → resume from checkpoint
 

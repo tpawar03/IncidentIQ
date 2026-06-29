@@ -28,17 +28,20 @@ from incidentiq.state import (
     IncidentState,
     IncidentStatus,
     RCAReport,
+    RemediationPlan,
     RetrievedContext,
 )
-
+from incidentiq.agents.terminal import synthesize_escalation, synthesize_unknown
 from incidentiq.agents.triage_router import triage_incident
-from incidentiq.graph.routing import route_after_rca, route_after_triage
+from incidentiq.graph.routing import route_after_rca, route_after_remediation, route_after_triage
 from incidentiq.state import TriageDecision
+from incidentiq.agents.remediation import plan_config_remediation, plan_infra_remediation
 
 # Injectable dependency signatures — real impls in retrieval/ + agents/, fakes in tests.
 RetrieveFn = Callable[[str], Awaitable[RetrievedContext]]
 SynthesizeFn = Callable[..., Awaitable[RCAReport]]
 TriageFn = Callable[..., Awaitable[TriageDecision]]
+RemediationFn = Callable[..., Awaitable[RemediationPlan]]
 
 
 def _retrieval_query(ctx: IncidentContext) -> str:
@@ -104,6 +107,50 @@ def make_triage_node(client: OllamaClient, triage_fn: TriageFn = triage_incident
         return {"triage_decision": decision, "trace": [_span("triage_router", start)]}
     return triage_node
 
+def make_remediation_node(node_name: str, client: OllamaClient, plan_fn: RemediationFn):
+    """Infra/config path node (Task 12): diagnosis → RemediationPlan of catalog intents.
+
+    A path agent that can't produce a catalog action raises LLMCallError → recorded as a typed
+    error + status=escalated; route_after_remediation then sends it to the central escalation sink.
+    """
+    async def remediation_node(state: IncidentState) -> dict:
+        start = datetime.now(timezone.utc)
+        try:
+            plan = await plan_fn(state.incident_context, state.rca_report, client=client)
+        except LLMCallError as e:
+            return {
+                "status": IncidentStatus.escalated,
+                "errors": [e.typed_error],
+                "trace": [_span(node_name, start)],
+            }
+        return {"remediation_plan": plan, "trace": [_span(node_name, start)]}
+    return remediation_node
+
+def make_escalation_node():
+    """Central escalation sink (Task 11): typed errors → evidence summary, no commands."""
+    async def escalation_node(state: IncidentState) -> dict:
+        start = datetime.now(timezone.utc)
+        plan, new_errors = synthesize_escalation(state)
+        return {
+            "status": IncidentStatus.escalated,
+            "remediation_plan": plan,
+            "errors": new_errors,                 # add-reducer appends the backfilled reason (F11-3)
+            "trace": [_span("escalation_node", start)],
+        }
+    return escalation_node
+
+
+def make_unknown_node():
+    """Unknown terminal path (Task 11): evidence + ranked hypotheses, no commands (FR-10)."""
+    async def unknown_node(state: IncidentState) -> dict:
+        start = datetime.now(timezone.utc)
+        return {
+            "status": IncidentStatus.unknown,
+            "remediation_plan": synthesize_unknown(state),
+            "trace": [_span("unknown_path", start)],
+        }
+    return unknown_node
+
 
 def build_graph(
     *,
@@ -111,6 +158,8 @@ def build_graph(
     retrieve_fn: RetrieveFn = retrieve,
     synthesize_fn: SynthesizeFn = synthesize_rca,
     triage_fn: TriageFn = triage_incident,
+    infra_fn: RemediationFn = plan_infra_remediation,
+    config_fn: RemediationFn = plan_config_remediation,
     checkpointer=None,
 ):
     """Flat StateGraph: parallel_retriever → rca_synthesizer →(Gate A)→ triage_router →(Gate B).
@@ -124,21 +173,35 @@ def build_graph(
     graph.add_node("parallel_retriever", make_retriever_node(retrieve_fn))
     graph.add_node("rca_synthesizer", make_rca_node(client, synthesize_fn))
     graph.add_node("triage_router", make_triage_node(client, triage_fn))
+    graph.add_node("runbook_executor", make_remediation_node("runbook_executor", client, infra_fn))
+    graph.add_node("config_diff_analyzer",make_remediation_node("config_diff_analyzer", client, config_fn))
+    graph.add_node("escalation_node", make_escalation_node())
+    graph.add_node("unknown_path", make_unknown_node())
 
     graph.add_edge(START, "parallel_retriever")
     graph.add_edge("parallel_retriever", "rca_synthesizer")
 
     # Gate A: composite RCA confidence < threshold → escalation, else triage.
     graph.add_conditional_edges("rca_synthesizer", route_after_rca, {
-        "escalation_node": END,        # PLACEHOLDER → Task 11 (central escalation node)
+        "escalation_node": "escalation_node",   # Task 11: real sink (was END)
         "triage_router": "triage_router",
     })
     # Gate B: incident_type → remediation entry; low confidence → unknown (no commands).
     graph.add_conditional_edges("triage_router", route_after_triage, {
-        "runbook_executor": END,       # PLACEHOLDER → Task 12 (infra path)
-        "config_diff_analyzer": END,   # PLACEHOLDER → Task 12 (config path)
-        "ast_code_retriever": END,     # PLACEHOLDER → Task 12 (code path)
-        "unknown_path": END,           # PLACEHOLDER → Task 11 (unknown terminal)
+        "runbook_executor": "runbook_executor",            # Task 12: infra path (was END)
+        "config_diff_analyzer": "config_diff_analyzer",    # Task 12: config path (was END)
+        "ast_code_retriever": END,     # PLACEHOLDER → AST/code task
+        "unknown_path": "unknown_path",
     })
+    # After a path agent: a usable plan → HITL checkpoint (later task → END); else the central
+    # escalation sink (Task 11) — proving one sink absorbs remediation failures too.
+    for path_node in ("runbook_executor", "config_diff_analyzer"):
+        graph.add_conditional_edges(path_node, route_after_remediation, {
+            "human_checkpoint": END,      # PLACEHOLDER → HITL task
+            "escalation_node": "escalation_node",
+        })
+    # Both terminal sinks flow to post-mortem; that node lands in a later task → END for now.
+    graph.add_edge("escalation_node", END)
+    graph.add_edge("unknown_path", END)
 
     return graph.compile(checkpointer=checkpointer)

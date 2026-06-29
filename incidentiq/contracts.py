@@ -56,3 +56,15 @@ class TriageDraft(BaseModel):
     incident_type: IncidentType = Field(description="Best-fit category for this incident.")
     confidence: float = Field(ge=0.0, le=1.0, description="Confidence in the classification.")
     rationale: str = Field(max_length=400, description="Brief justification, 1-2 sentences.")
+
+class RemediationDraft(BaseModel):
+    """What the model emits to remediate: a catalog command_id + its args (FR-12, doc line 249).
+
+    The model picks an id from the presented MENU and fills args — it NEVER writes shell.
+    Validated against the real catalog before becoming a CommandIntent (the CI-4 backstop)."""
+
+    command_id: str = Field(description="Exactly one command_id chosen from the provided MENU.")
+    args: dict[str, str | int | bool] = Field(
+        default_factory=dict, description="Arguments for the chosen command, matching its schema."
+    )
+    summary: str = Field(max_length=400, description="One-line justification for the chosen action.")

@@ -42,3 +42,14 @@ def route_after_triage(state: IncidentState) -> str:
     if decision is None or decision.confidence < config.TRIAGE_UNKNOWN_BELOW:
         return "unknown_path"
     return _TYPE_TO_NODE.get(decision.incident_type, "unknown_path")
+
+def route_after_remediation(state: IncidentState) -> str:
+    """After a path agent: a usable plan → human checkpoint (HITL); else the escalation sink.
+
+    Reuses the SINGLE escalation_node (Task 11) for remediation failures too — a missing or
+    empty plan means the agent could not produce a catalog action, which is an escalation.
+    """
+    plan = state.remediation_plan
+    if plan is None or not plan.steps:
+        return "escalation_node"
+    return "human_checkpoint"
