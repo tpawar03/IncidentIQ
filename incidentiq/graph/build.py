@@ -18,22 +18,30 @@ from typing import Awaitable, Callable
 
 from langgraph.graph import StateGraph, START, END
 
+from incidentiq.agents.ast_code_retriever import retrieve_code_context
+from incidentiq.agents.patch_generator import generate_patch
 from incidentiq.agents.rca_synthesizer import synthesize_rca
 from incidentiq.errors import LLMCallError
 from incidentiq.llm.ollama_client import OllamaClient
 from incidentiq.retrieval.retriever import retrieve
 from incidentiq.state import (
     AgentSpan,
+    CodeContext,
     IncidentContext,
     IncidentState,
     IncidentStatus,
+    Patch,
     RCAReport,
+    RemediationClass,
     RemediationPlan,
     RetrievedContext,
 )
 from incidentiq.agents.terminal import synthesize_escalation, synthesize_unknown
 from incidentiq.agents.triage_router import triage_incident
-from incidentiq.graph.routing import route_after_rca, route_after_remediation, route_after_triage
+from incidentiq.graph.routing import (
+    route_after_ast, route_after_patch, route_after_rca, route_after_remediation,
+    route_after_triage,
+)
 from incidentiq.state import TriageDecision
 from incidentiq.agents.remediation import plan_config_remediation, plan_infra_remediation
 
@@ -42,6 +50,8 @@ RetrieveFn = Callable[[str], Awaitable[RetrievedContext]]
 SynthesizeFn = Callable[..., Awaitable[RCAReport]]
 TriageFn = Callable[..., Awaitable[TriageDecision]]
 RemediationFn = Callable[..., Awaitable[RemediationPlan]]
+CodeRetrieveFn = Callable[..., Awaitable[CodeContext]]
+PatchFn = Callable[..., Awaitable["tuple[Patch, RemediationPlan] | None"]]
 
 
 def _retrieval_query(ctx: IncidentContext) -> str:
@@ -126,6 +136,67 @@ def make_remediation_node(node_name: str, client: OllamaClient, plan_fn: Remedia
         return {"remediation_plan": plan, "trace": [_span(node_name, start)]}
     return remediation_node
 
+def make_ast_node(retrieve_fn: CodeRetrieveFn = retrieve_code_context):
+    """AST/code path node (Task 13): diagnosis -> CodeContext (localize; patching is Task 14).
+
+    No LLM call here — pure git + tree-sitter — so the only failure mode is a typed
+    clone/metadata error, caught the same way as the LLM-backed path nodes.
+    """
+    async def ast_node(state: IncidentState) -> dict:
+        start = datetime.now(timezone.utc)
+        try:
+            code_context = await retrieve_fn(state.incident_context, state.rca_report)
+        except LLMCallError as e:
+            return {
+                "status": IncidentStatus.escalated,
+                "errors": [e.typed_error],
+                "trace": [_span("ast_code_retriever", start)],
+            }
+        return {"code_context": code_context, "trace": [_span("ast_code_retriever", start)]}
+    return ast_node
+
+
+def make_patch_node(client: OllamaClient, patch_fn: PatchFn = generate_patch):
+    """Patch path node (Task 14): regenerate the localized function → validated Patch (decision #3).
+
+    Success → sets `patch` + a code-path `remediation_plan`. Any failure (double syntax/scope
+    fail, or the clone/LLM giving out) leaves both unset and defers to route_after_patch, which
+    sends it to code_context_only — a wrong patch is worse than an honest location + TODO (SF-5).
+    """
+    async def patch_node(state: IncidentState) -> dict:
+        start = datetime.now(timezone.utc)
+        try:
+            result = await patch_fn(
+                state.incident_context, state.rca_report, state.code_context, client=client,
+            )
+        except LLMCallError:
+            result = None                                 # degrade to code_context_only, not escalation
+        if result is None:
+            return {"trace": [_span("patch_generator", start)]}
+        patch, plan = result
+        return {"patch": patch, "remediation_plan": plan, "trace": [_span("patch_generator", start)]}
+    return patch_node
+
+
+def make_code_context_only_node():
+    """C#/Rust/Go, or a patch that couldn't be trusted: emit the location + a TODO, NO diff,
+    NO command (FR-14 / SF-5). Deterministic (no LLM) — a no-command plan the human reviews."""
+    async def code_context_only_node(state: IncidentState) -> dict:
+        start = datetime.now(timezone.utc)
+        code = state.code_context
+        where = f"{code.function_name} ({code.file_path})" if code and code.function_name else "the localized area"
+        rca = state.rca_report
+        plan = RemediationPlan(
+            remediation_class=RemediationClass.none,
+            summary=f"Automated patch not available; a human should review {where}. "
+                    "Location provided, no code change generated.",
+            steps=[],
+            references=rca.source_citations if rca is not None else [],
+        )
+        return {"remediation_plan": plan, "trace": [_span("code_context_only", start)]}
+    return code_context_only_node
+
+
 def make_escalation_node():
     """Central escalation sink (Task 11): typed errors → evidence summary, no commands."""
     async def escalation_node(state: IncidentState) -> dict:
@@ -160,13 +231,15 @@ def build_graph(
     triage_fn: TriageFn = triage_incident,
     infra_fn: RemediationFn = plan_infra_remediation,
     config_fn: RemediationFn = plan_config_remediation,
+    ast_fn: CodeRetrieveFn = retrieve_code_context,
+    patch_fn: PatchFn = generate_patch,
     checkpointer=None,
 ):
     """Flat StateGraph: parallel_retriever → rca_synthesizer →(Gate A)→ triage_router →(Gate B).
 
     The two confidence gates (routing.py) are wired as conditional edges. Downstream
     targets (escalation_node, unknown_path, remediation entries) are mapped to END here
-    and replaced with real nodes in Tasks 11/12. Deps are injected for test fakes.
+    and replaced with real nodes in Tasks 11/12/13. Deps are injected for test fakes.
     Node ids match AGENT_ORCHESTRATION.md §6 exactly.
     """
     graph = StateGraph(IncidentState)
@@ -174,7 +247,10 @@ def build_graph(
     graph.add_node("rca_synthesizer", make_rca_node(client, synthesize_fn))
     graph.add_node("triage_router", make_triage_node(client, triage_fn))
     graph.add_node("runbook_executor", make_remediation_node("runbook_executor", client, infra_fn))
-    graph.add_node("config_diff_analyzer",make_remediation_node("config_diff_analyzer", client, config_fn))
+    graph.add_node("config_diff_analyzer", make_remediation_node("config_diff_analyzer", client, config_fn))
+    graph.add_node("ast_code_retriever", make_ast_node(ast_fn))
+    graph.add_node("patch_generator", make_patch_node(client, patch_fn))
+    graph.add_node("code_context_only", make_code_context_only_node())
     graph.add_node("escalation_node", make_escalation_node())
     graph.add_node("unknown_path", make_unknown_node())
 
@@ -190,7 +266,7 @@ def build_graph(
     graph.add_conditional_edges("triage_router", route_after_triage, {
         "runbook_executor": "runbook_executor",            # Task 12: infra path (was END)
         "config_diff_analyzer": "config_diff_analyzer",    # Task 12: config path (was END)
-        "ast_code_retriever": END,     # PLACEHOLDER → AST/code task
+        "ast_code_retriever": "ast_code_retriever",         # Task 13: code path (was END)
         "unknown_path": "unknown_path",
     })
     # After a path agent: a usable plan → HITL checkpoint (later task → END); else the central
@@ -200,6 +276,21 @@ def build_graph(
             "human_checkpoint": END,      # PLACEHOLDER → HITL task
             "escalation_node": "escalation_node",
         })
+    # After ast_code_retriever (Task 13): localized+patch-supported → patch_generator; C#/Rust/Go
+    # or a non-function hit → code_context_only; no usable location → central escalation sink.
+    graph.add_conditional_edges("ast_code_retriever", route_after_ast, {
+        "patch_generator": "patch_generator",         # Task 14: real node (was END)
+        "code_context_only": "code_context_only",     # Task 14: real node (was END)
+        "escalation_node": "escalation_node",
+    })
+    # After patch_generator (Task 14): valid+in-scope patch → HITL checkpoint (END placeholder);
+    # double-fail / out-of-scope → code_context_only (honest location + TODO, no diff — SF-5).
+    graph.add_conditional_edges("patch_generator", route_after_patch, {
+        "human_checkpoint": END,          # PLACEHOLDER → HITL task
+        "code_context_only": "code_context_only",
+    })
+    # code_context_only is a no-command plan the human still reviews → HITL checkpoint.
+    graph.add_edge("code_context_only", END)          # PLACEHOLDER → HITL task
     # Both terminal sinks flow to post-mortem; that node lands in a later task → END for now.
     graph.add_edge("escalation_node", END)
     graph.add_edge("unknown_path", END)

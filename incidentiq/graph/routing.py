@@ -53,3 +53,27 @@ def route_after_remediation(state: IncidentState) -> str:
     if plan is None or not plan.steps:
         return "escalation_node"
     return "human_checkpoint"
+
+
+def route_after_ast(state: IncidentState) -> str:
+    """After ast_code_retriever: no usable localization → escalation; a patch-supported
+    language with a located function → patch_generator; otherwise → code_context_only
+    (location + TODO, no diff — C#/Rust/Go, or a hit that isn't inside a function).
+    """
+    ctx = state.code_context
+    if ctx is None or not ctx.retrieval_ok:
+        return "escalation_node"
+    if ctx.patch_supported and ctx.function_name:
+        return "patch_generator"
+    return "code_context_only"
+
+
+def route_after_patch(state: IncidentState) -> str:
+    """After patch_generator: a syntax-valid, in-scope patch → human_checkpoint; anything
+    else (double failure / out-of-scope, SF-5) → code_context_only. A misleading patch is
+    worse than an honest 'here's the location, a human should look'.
+    """
+    patch = state.patch
+    if patch is not None and patch.syntax_valid and patch.scope_ok:
+        return "human_checkpoint"
+    return "code_context_only"

@@ -68,3 +68,19 @@ class RemediationDraft(BaseModel):
         default_factory=dict, description="Arguments for the chosen command, matching its schema."
     )
     summary: str = Field(max_length=400, description="One-line justification for the chosen action.")
+
+
+class PatchDraft(BaseModel):
+    """What the model emits to fix a code bug: the WHOLE corrected function, nothing else (decision #3).
+
+    The model is only ever asked to rewrite one function correctly — it never produces a diff or
+    line numbers (small models get those wrong). The unified diff + syntax check are computed
+    deterministically from this body afterwards. `new_function_body` must be a drop-in replacement
+    for the localized function (same name/signature), preserving its original indentation."""
+
+    new_function_body: str = Field(
+        description="The complete corrected function, from its declaration to its closing line. "
+                    "Same name and signature as the original; original indentation preserved. "
+                    "No surrounding code, no explanation, no markdown fences."
+    )
+    summary: str = Field(max_length=400, description="One-line description of what the fix changes and why.")

@@ -12,3 +12,6 @@ wheels/
 
 # Third-party corpus repos (fetched locally, never vendored)
 corpus_sources/
+
+# AST code retriever clone cache (FR-26), commit-hash keyed, never vendored
+.cache/

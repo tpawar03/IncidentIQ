@@ -33,3 +33,8 @@ RECENT_DEPLOY_MINUTES: int = 60
 TRIAGE_AGREE_BONUS: float = 0.10       # rule↔LLM concur → corroboration boost
 TRIAGE_DISAGREE_PENALTY: float = 0.30  # rule↔LLM conflict → drop toward the unknown gate
 
+# --- AST code retriever (Task 13) ---
+# Repo-relative in dev; the deployed container mounts /repos/cache over this path (FR-26).
+AST_CLONE_CACHE_ROOT: str = ".cache/repos"
+AST_CLONE_TIMEOUT_SECONDS: float = 20.0   # per git subprocess call (fetch, then checkout)
+
